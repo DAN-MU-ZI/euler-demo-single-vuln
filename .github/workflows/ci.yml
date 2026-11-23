@@ -1,0 +1,75 @@
+name: Euler Security CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, release, 'release/*']
+
+permissions: {}
+
+jobs:
+  submit-to-euler:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 검사 이벤트를 Euler에 접수
+        shell: bash
+        env:
+          EULER_BASE_URL: ${{ vars.EULER_BASE_URL }}
+          EULER_PORTAL_KEY: ${{ secrets.EULER_PORTAL_KEY }}
+        run: |
+          set -euo pipefail
+          : "${EULER_BASE_URL:?EULER_BASE_URL 저장소 변수를 설정하세요.}"
+
+          payload_file="$RUNNER_TEMP/euler-payload.json"
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              endpoint=baseline
+              jq '{
+                repo_url: .repository.html_url,
+                provider: "github",
+                branch: (.ref | sub("^refs/heads/"; "")),
+                sha: .after,
+                deleted: (.deleted // false)
+              }' "$GITHUB_EVENT_PATH" > "$payload_file"
+              ;;
+            pull_request)
+              endpoint=review
+              jq '{
+                repo_url: .repository.html_url,
+                provider: "github",
+                pull_request: .pull_request.number,
+                head_ref: .pull_request.head.ref,
+                head_sha: .pull_request.head.sha,
+                base_ref: .pull_request.base.ref,
+                base_sha: .pull_request.base.sha,
+                action: .action
+              }' "$GITHUB_EVENT_PATH" > "$payload_file"
+              ;;
+            *)
+              printf '지원하지 않는 이벤트입니다. %s\n' "$GITHUB_EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          auth_args=()
+          if [[ -n "${EULER_PORTAL_KEY:-}" ]]; then
+            auth_args=(-H "Authorization: Bearer $EULER_PORTAL_KEY")
+          fi
+
+          response_file="$RUNNER_TEMP/euler-response.json"
+          status="$(curl --silent --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            -H "Content-Type: application/json" \
+            -H "ngrok-skip-browser-warning: 1" \
+            "${auth_args[@]}" \
+            --data-binary "@$payload_file" \
+            "${EULER_BASE_URL%/}/api/vcs/$endpoint")"
+
+          cat "$response_file"
+          if [[ "$status" != 202 ]]; then
+            printf '\nEuler 검사 접수 실패 (HTTP %s)\n' "$status" >&2
+            exit 1
+          fi
